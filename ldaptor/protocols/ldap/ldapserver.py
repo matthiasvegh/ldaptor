@@ -209,14 +209,47 @@ class LDAPServer(BaseLDAPServer):
                     objectName=str(entry.dn),
                     attributes=filtered_attribs,
                     ))
+
+        def _handleAlias(entry, aliasedObjectNames):
+            aliasedObjectName, = aliasedObjectNames
+            root = interfaces.IConnectedLDAPEntry(self.factory)
+            deferred = root.lookup(aliasedObjectName)
+
+            def _handleAliasResolve(newBase):
+                deferred = newBase.search(filterObject=request.filter,
+                                          attributes=request.attributes,
+                                          scope=request.scope,
+                                          derefAliases=request.derefAliases,
+                                          sizeLimit=request.sizeLimit,
+                                          timeLimit=request.timeLimit,
+                                          typesOnly=request.typesOnly)
+                deferred.addCallback(_handleEntries)
+                return deferred
+
+            deferred.addCallback(_handleAliasResolve)
+            return deferred
+
+        def _handleEntries(entries):
+            pendingAliasResolutions = []
+            for entry in entries:
+                aliasedObjectName = entry.get('aliasedObjectName')
+                if (aliasedObjectName is None or request.derefAliases ==
+                        pureldap.LDAP_DEREF_neverDerefAliases):
+                    _sendEntryToClient(entry)
+                else:
+                    deferred = _handleAlias(entry, aliasedObjectName)
+                    pendingAliasResolutions.append(deferred)
+            if pendingAliasResolutions:
+                return defer.DeferredList(pendingAliasResolutions)
+
         d = base.search(filterObject=request.filter,
                         attributes=request.attributes,
                         scope=request.scope,
                         derefAliases=request.derefAliases,
                         sizeLimit=request.sizeLimit,
                         timeLimit=request.timeLimit,
-                        typesOnly=request.typesOnly,
-                        callback=_sendEntryToClient)
+                        typesOnly=request.typesOnly)
+        d.addCallback(_handleEntries)
 
         def _done(_):
             return pureldap.LDAPSearchResultDone(
